@@ -20,15 +20,15 @@ server.on('connection', (socket) => {
 
   socket.on('message', (message) => {
     const data = JSON.parse(message);
-    console.log('Message', data);
+    // console.log('Message', data);
     if (data.type === 'offer') {
       rooms.set(data.roomId, {
         users: { [data.userId]: socket },
         offer: data.offer,
       });
 
-      console.log('room created')
-      console.log('rooms', rooms);
+      // console.log('room created')
+      // console.log('rooms', rooms);
     } else if (data.type === 'join-room') {
       if (rooms.has(data.roomId)) {
         rooms.get(data.roomId).users[data.userId] = socket;
@@ -47,11 +47,11 @@ server.on('connection', (socket) => {
       }
     } else if (data.type === 'answer') {
       const room = rooms.get(data.roomId);
-      // console.log('room', room);
-      // console.log('data', data);
+      console.log('room', room);
+      console.log('data', data);
       const otherUser = Object.keys(room.users).find(key => key !== data.userId);
-      // console.log('otherUser', otherUser);
-      // console.log('room.users[otherUser]', room.users[otherUser]);
+      console.log('otherUser', otherUser);
+      console.log('room.users[otherUser]', room.users[otherUser]);
       room.users[otherUser].send(JSON.stringify({
         type: 'answer',
         answer: data.answer,

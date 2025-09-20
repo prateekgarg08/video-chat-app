@@ -14,177 +14,201 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Video, Users, Plus, LogIn, Copy, CheckCircle } from "lucide-react";
 
+const generateRandomString = (length: number = 10): string => {
+  const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += characters.charAt(Math.floor(Math.random() * characters.length));
+  }
+  return result;
+};
+
 function App() {
-  const [roomId, setRoomId] = useState<string>("");
-
   // Generate random string function
-  const generateRandomString = (length: number = 10): string => {
-    const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let result = "";
-    for (let i = 0; i < length; i++) {
-      result += characters.charAt(Math.floor(Math.random() * characters.length));
-    }
-    return result;
-  };
 
+  const [userId] = useState(generateRandomString(12));
+
+  const [roomId] = useState<string>(generateRandomString(12));
   const [ws, setWs] = useState<WebSocket | null>(null);
 
-  const hostConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const locationConnectionRef = useRef<RTCPeerConnection>(new RTCPeerConnection());
 
-  const userIdRef = useRef<string>(generateRandomString(12));
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
+  const answerResolveFunctionRef = useRef<((value: RTCSessionDescriptionInit) => void) | null>(null);
+  const answer = useRef<RTCSessionDescriptionInit | null>(null);
+  const offerResolveFunctionRef = useRef<((value: RTCSessionDescriptionInit) => void) | null>(null);
+  const offer = useRef<RTCSessionDescriptionInit | null>(null);
+  const iceGatheringCompleteRef = useRef<((value: boolean) => void) | null>(null);
   useEffect(() => {
-    // Generate random string when component mounts
-    setRoomId(generateRandomString(12));
-  }, []);
+    const socket = new WebSocket("ws://localhost:8080");
 
-  const handleCreateRoom = () => {
-    console.log("Creating room with ID:", roomId);
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      console.log("Message", data);
+      if (data.type === "answer") {
+        answer.current = data.answer;
+        answerResolveFunctionRef.current!(data.answer);
+      } else if (data.type === "offer") {
+        offer.current = data.offer;
+        offerResolveFunctionRef.current!(data.offer);
+      }
+    };
+
+    setWs(socket);
+
+    console.log("localVideoRef.current", localVideoRef.current);
+    console.log("remoteVideoRef.current", remoteVideoRef.current);
 
     navigator.mediaDevices
       .getUserMedia({ video: true, audio: true })
       .then((stream) => {
-        const video = document.createElement("video");
-        video.srcObject = stream;
-        video.muted = true;
-        video.play();
-        document.body.appendChild(video);
+        console.log("Got local media stream");
+        if (localVideoRef.current && !localVideoRef.current.srcObject) {
+          localVideoRef.current.srcObject = stream;
+          localVideoRef.current.play().catch(console.error);
+          console.log("Set local video source");
+        }
 
-        console.log(stream);
-
-        const localConnection = new RTCPeerConnection();
-        hostConnectionRef.current = localConnection;
-        localConnection.ontrack = (event) => {
-          console.log("got track event", event);
-
-          const video = document.createElement("video");
-          video.srcObject = event.streams[0];
-          video.play();
-          document.body.appendChild(video);
-        };
-        localConnection.addTrack(stream.getTracks()[0], stream);
-
-        // let offer: RTCSessionDescriptionInit | null = null;
-        localConnection.createOffer().then((offer) => {
-          localConnection.setLocalDescription(offer);
-
-          if (ws) {
-            ws.send(
-              JSON.stringify({
-                type: "offer",
-                userId: userIdRef.current,
-                roomId: roomId,
-                offer: offer,
-              })
-            );
-          }
+        stream.getTracks().forEach((track) => {
+          console.log("Adding track to peer connection:", track);
+          locationConnectionRef.current.addTrack(track, stream);
         });
       })
       .catch((error) => {
         console.error("Error accessing media devices:", error);
       });
 
-    // TODO: Implement room creation logic
-  };
+    locationConnectionRef.current.ontrack = (event) => {
+      console.log("Received remote track:", event.track);
+      console.log("Remote streams:", event.streams);
 
-  const [joinRoomId, setJoinRoomId] = useState<string>("");
-  const [isJoinDialogOpen, setIsJoinDialogOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  const handleJoinRoom = () => {
-    if (joinRoomId.trim() && ws) {
-      console.log("Joining room:", joinRoomId);
-      ws.send(
-        JSON.stringify({
-          type: "join-room",
-          userId: userIdRef.current,
-          roomId: joinRoomId,
-        })
-      );
-      setIsJoinDialogOpen(false);
-    }
-  };
-
-  const copyRoomId = async () => {
-    try {
-      await navigator.clipboard.writeText(roomId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error("Failed to copy room ID:", err);
-    }
-  };
-
-  useEffect(() => {
-    let websocket: WebSocket | null = null;
-
-    try {
-      websocket = new WebSocket("ws://localhost:8080");
-      setWs(websocket);
-      websocket.onopen = () => {
-        console.log("Connected to server");
-      };
-      websocket.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        console.log(data);
-
-        if (data.type === "offer") {
-          const offer = new RTCSessionDescription(data.offer);
-          const roomId = data.roomId;
-
-          const localConnection = new RTCPeerConnection();
-          localConnection.ontrack = (event) => {
-            console.log("got track event", event);
-            const video = document.createElement("video");
-            video.srcObject = event.streams[0];
-            video.play();
-            document.body.appendChild(video);
-          };
-
-          navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
-            localConnection.addTrack(stream.getTracks()[0], stream);
-            const video = document.createElement("video");
-            video.srcObject = stream;
-            video.play();
-            document.body.appendChild(video);
-
-            localConnection.setRemoteDescription(offer);
-            localConnection.createAnswer().then((answer) => {
-              localConnection.setLocalDescription(answer);
-              websocket?.send(
-                JSON.stringify({
-                  type: "answer",
-                  userId: userIdRef.current,
-                  roomId: roomId,
-                  answer: answer,
-                })
-              );
-            });
-          });
-        } else if (data.type === "answer") {
-          const answer = new RTCSessionDescription(data.answer);
-          hostConnectionRef.current?.setRemoteDescription(answer);
+      // Use the stream directly from the event
+      if (event.streams && event.streams[0]) {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = event.streams[0];
+          remoteVideoRef.current.play().catch(console.error);
+          console.log("Set remote video source");
         }
+      }
+    };
 
-        // console.log(event.data);
-      };
-      // websocket.onerror = (error) => {
-      //   console.error("WebSocket error:", error);
-      // };
-      // websocket.onclose = () => {
-      //   console.log("WebSocket connection closed");
-      // };
-    } catch (error) {
-      console.error("Failed to create WebSocket connection:", error);
-    }
+    locationConnectionRef.current.onicecandidate = (event) => {
+      console.log("ICE candidate updated", event.candidate);
+      console.log("locationConnectionRef.current.localDescription", locationConnectionRef.current.localDescription);
 
-    // Cleanup function
-    return () => {
-      if (websocket && (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING)) {
-        websocket.close();
+      // When event.candidate is null, ICE gathering is complete
+      if (event.candidate === null && iceGatheringCompleteRef.current) {
+        console.log("ICE gathering complete");
+        iceGatheringCompleteRef.current(true);
       }
     };
   }, []);
+
+  const waitForAnswer = async () => {
+    return new Promise((resolve) => {
+      answerResolveFunctionRef.current = resolve;
+    });
+  };
+  const waitForOffer = async () => {
+    return new Promise((resolve) => {
+      offerResolveFunctionRef.current = resolve;
+    });
+  };
+  const waitForIceGatheringComplete = async () => {
+    return new Promise((resolve) => {
+      iceGatheringCompleteRef.current = resolve;
+    });
+  };
+
+  const handleCreateRoom = async () => {
+    const dc = locationConnectionRef.current.createDataChannel("channel");
+
+    dc.onmessage = (event) => {
+      console.log("Message", event.data);
+    };
+    dc.onopen = () => {
+      console.log("Data channel opened");
+      dc.send("hello from sender");
+    };
+    dc.onclose = () => {
+      console.log("Data channel closed");
+    };
+
+    const offer = await locationConnectionRef.current.createOffer();
+    await locationConnectionRef.current.setLocalDescription(offer);
+
+    // Wait for ICE gathering to complete before sending the offer
+    console.log("Waiting for ICE gathering to complete...");
+    await waitForIceGatheringComplete();
+
+    ws?.send(
+      JSON.stringify({
+        type: "offer",
+        roomId: roomId,
+        offer: locationConnectionRef.current.localDescription,
+        userId: userId,
+      })
+    );
+    console.log(new Date().getTime(), "offer sent");
+    await waitForAnswer();
+    console.log(new Date().getTime(), "answer received");
+    console.log("answer.current", answer.current);
+    await locationConnectionRef.current.setRemoteDescription(answer.current!);
+    console.log(locationConnectionRef.current);
+  };
+
+  const handleJoinRoom = async (joinRoomId: string) => {
+    ws?.send(
+      JSON.stringify({
+        type: "join-room",
+        roomId: joinRoomId,
+        userId: userId,
+      })
+    );
+
+    locationConnectionRef.current.ondatachannel = (event) => {
+      console.log("Data channel opened");
+      const dc = event.channel;
+      dc.onmessage = (event) => {
+        console.log("Message", event.data);
+      };
+      dc.onopen = () => {
+        console.log("Data channel opened");
+      };
+      dc.onclose = () => {
+        console.log("Data channel closed");
+      };
+    };
+
+    await waitForOffer();
+    console.log(new Date().getTime(), "offer received");
+    console.log("offer.current", offer.current);
+    await locationConnectionRef.current.setRemoteDescription(offer.current!);
+
+    const answer = await locationConnectionRef.current.createAnswer();
+    await locationConnectionRef.current.setLocalDescription(answer);
+
+    // Wait for ICE gathering to complete before sending the answer
+    console.log("Waiting for ICE gathering to complete...");
+    await waitForIceGatheringComplete();
+
+    ws?.send(
+      JSON.stringify({
+        type: "answer",
+        roomId: joinRoomId,
+        answer: locationConnectionRef.current.localDescription,
+        userId: userId,
+      })
+    );
+    console.log(locationConnectionRef.current);
+    console.log(new Date().getTime(), "answer sent");
+  };
+
+  const [isJoinDialogOpen, setIsJoinDialogOpen] = useState(false);
+  const [joinRoomId, setJoinRoomId] = useState("");
+  const [copied, setCopied] = useState(false);
 
   return (
     <TooltipProvider>
@@ -238,10 +262,10 @@ function App() {
                       value={joinRoomId}
                       onChange={(e) => setJoinRoomId(e.target.value)}
                       className="text-center text-lg tracking-wider"
-                      onKeyPress={(e) => e.key === "Enter" && handleJoinRoom()}
+                      onKeyPress={(e) => e.key === "Enter" && handleJoinRoom(joinRoomId)}
                     />
                     <Button
-                      onClick={handleJoinRoom}
+                      onClick={() => handleJoinRoom(joinRoomId)}
                       className="w-full bg-blue-600 hover:bg-blue-700"
                       disabled={!joinRoomId.trim()}
                     >
@@ -267,7 +291,10 @@ function App() {
                           variant="ghost"
                           size="sm"
                           className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity"
-                          onClick={copyRoomId}
+                          onClick={() => {
+                            setCopied(true);
+                            navigator.clipboard.writeText(roomId);
+                          }}
                         >
                           {copied ? <CheckCircle className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
                         </Button>
@@ -282,6 +309,30 @@ function App() {
               </div>
             </CardContent>
           </Card>
+
+          <div className="flex flex-col gap-4 mt-6">
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-sm font-medium text-gray-700 mb-2">Your Video</h3>
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="w-full max-w-sm bg-gray-100 rounded-lg border-2 border-gray-200"
+                />
+              </div>
+              <div>
+                <h3 className="text-sm font-medium text-gray-700 mb-2">Remote Video</h3>
+                <video
+                  ref={remoteVideoRef}
+                  autoPlay
+                  playsInline
+                  className="w-full max-w-sm bg-gray-100 rounded-lg border-2 border-gray-200"
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </TooltipProvider>
