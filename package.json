@@ -1,16 +1,26 @@
 {
   "name": "video-chat-app",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "dist/main.js",
   "scripts": {
-    "dev": "node --watch main.js"
+    "dev": "tsx --watch src/main.ts",
+    "build": "npx tsc",
+    "start": "node dist/main.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "mediasoup": "^3.19.2",
     "mongoose": "^8.18.1",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
   }
 }

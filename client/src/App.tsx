@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -13,178 +13,186 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Video, Users, Plus, LogIn, Copy, CheckCircle } from "lucide-react";
+import { useSignaling } from "./hooks/useSignaling";
+import { Device } from "mediasoup-client";
+// import type { RtpCapabilities } from "mediasoup-client/types";
+const generateRandomString = (length: number = 10): string => {
+  const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += characters.charAt(Math.floor(Math.random() * characters.length));
+  }
+  return result;
+};
 
 function App() {
-  const [roomId, setRoomId] = useState<string>("");
+  const [roomId, setRoomId] = useState<string>(generateRandomString(12));
+  // const userIdRef = useRef<string>(generateRandomString(12));
+  const {
+    initializeConnection,
+    requestTransport,
+    requestRouterCapabilities,
+    requestConnectTransport,
+    requestProduce,
+    requestConsume,
+  } = useSignaling();
 
-  // Generate random string function
-  const generateRandomString = (length: number = 10): string => {
-    const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let result = "";
-    for (let i = 0; i < length; i++) {
-      result += characters.charAt(Math.floor(Math.random() * characters.length));
-    }
-    return result;
+  // const peerConnectionRef = useRef<RTCPeerConnection>(new RTCPeerConnection());
+
+  // const [routerCapabilities, setRouterCapabilities] = useState<RtpCapabilities | null>(null);
+
+  const localVideoElementRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoElementRef = useRef<HTMLVideoElement | null>(null);
+  const deviceRef = useRef<Device>(new Device());
+
+  const initalizeMediasoup = async (ws: WebSocket) => {
+    const capabilities = await requestRouterCapabilities(ws);
+    if (!capabilities) return;
+    // setRouterCapabilities(capabilities);
+    if (deviceRef.current.loaded) return;
+    await deviceRef.current.load({ routerRtpCapabilities: capabilities });
   };
 
-  const [ws, setWs] = useState<WebSocket | null>(null);
-
-  const hostConnectionRef = useRef<RTCPeerConnection | null>(null);
-
-  const userIdRef = useRef<string>(generateRandomString(12));
-
   useEffect(() => {
-    // Generate random string when component mounts
-    setRoomId(generateRandomString(12));
+    initializeConnection(initalizeMediasoup);
   }, []);
 
-  const handleCreateRoom = () => {
-    console.log("Creating room with ID:", roomId);
+  const handleCreateRoom = async () => {
+    const transport = await requestTransport();
+    if (!transport) return;
 
-    navigator.mediaDevices
-      .getUserMedia({ video: true, audio: true })
-      .then((stream) => {
-        const video = document.createElement("video");
-        video.srcObject = stream;
-        video.muted = true;
-        video.play();
-        document.body.appendChild(video);
+    console.log("transport", transport);
 
-        console.log(stream);
+    const sendTransport = await deviceRef.current.createSendTransport(transport);
 
-        const localConnection = new RTCPeerConnection();
-        hostConnectionRef.current = localConnection;
-        localConnection.ontrack = (event) => {
-          console.log("got track event", event);
+    sendTransport.on("icecandidateerror", (error) => {
+      console.log("icecandidateerror", error);
+    });
 
-          const video = document.createElement("video");
-          video.srcObject = event.streams[0];
-          video.play();
-          document.body.appendChild(video);
-        };
-        localConnection.addTrack(stream.getTracks()[0], stream);
+    sendTransport.on("icegatheringstatechange", (event) => {
+      console.log("icegatheringstatechange", event);
+    });
 
-        // let offer: RTCSessionDescriptionInit | null = null;
-        localConnection.createOffer().then((offer) => {
-          localConnection.setLocalDescription(offer);
+    sendTransport.on("connect", async ({ dtlsParameters }, callback, error) => {
+      await requestConnectTransport({ dtlsParameters });
 
-          if (ws) {
-            ws.send(
-              JSON.stringify({
-                type: "offer",
-                userId: userIdRef.current,
-                roomId: roomId,
-                offer: offer,
-              })
-            );
-          }
-        });
-      })
-      .catch((error) => {
-        console.error("Error accessing media devices:", error);
+      callback();
+    });
+
+    sendTransport.on("produce", async ({ kind, rtpParameters }, callback) => {
+      const producer = await requestProduce({ kind, rtpParameters });
+      if (!producer) return;
+      setRoomId(producer.id);
+
+      callback({ id: producer.id });
+    });
+
+    sendTransport.on("connectionstatechange", (state) => {
+      console.log("send transport connectionstatechange", state);
+    });
+
+    console.log("requesting media");
+
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
+      console.log("got media streams");
+      if (localVideoElementRef.current && !localVideoElementRef.current.srcObject) {
+        localVideoElementRef.current.srcObject = stream;
+        localVideoElementRef.current?.play();
+      }
+      stream.getTracks().forEach((track) => {
+        sendTransport.produce({ track });
       });
+    });
+  };
 
-    // TODO: Implement room creation logic
+  // const handleCreateRoom = async () => {
+  //   await createRoom();
+  // };
+  const handleJoinRoom = async (roomId: string) => {
+    const transport = await requestTransport();
+    if (!transport) return;
+    const recvTransport = await deviceRef.current.createRecvTransport(transport);
+    recvTransport.on("connect", async ({ dtlsParameters }, callback) => {
+      console.log("connecting to recv transport");
+      await requestConnectTransport({ dtlsParameters });
+      callback();
+      console.log("connected to recv transport");
+    });
+
+    let stream: MediaStream;
+    recvTransport.on("connectionstatechange", (state) => {
+      console.log("🔄 recv transport connectionstatechange:", state);
+      switch (state) {
+        case "new":
+          console.log("📝 Transport initialized but not connected yet");
+          break;
+        case "connecting":
+          console.log("🔗 Transport attempting to connect (DTLS handshake)");
+          break;
+        case "connected":
+          console.log("✅ Transport successfully connected!");
+          console.log("stream", stream);
+          if (remoteVideoElementRef.current && !remoteVideoElementRef.current.srcObject) {
+            console.log("setting remote video element src object");
+            remoteVideoElementRef.current.srcObject = stream;
+            remoteVideoElementRef.current?.play();
+            console.log("remote video element src object set", remoteVideoElementRef.current);
+          }
+          break;
+        case "failed":
+          console.log("❌ Transport connection failed");
+          break;
+        case "disconnected":
+          console.log("⚠️ Transport disconnected");
+          break;
+        case "closed":
+          console.log("🚪 Transport closed");
+          break;
+      }
+    });
+
+    const consumer = await requestConsume({ producerId: roomId, rtpCapabilities: deviceRef.current.rtpCapabilities });
+
+    console.log("recv transport", recvTransport.connectionState);
+    console.log("got consumer", consumer);
+    if (!consumer) return;
+    const { id, producerId, kind, rtpParameters } = consumer;
+    recvTransport.consume({ id, producerId, kind, rtpParameters }).then(async (consumer) => {
+      console.log("consuming");
+
+      console.log("recv transport state before resume:", recvTransport.connectionState);
+
+      console.log("consumer", {
+        id,
+        producerId,
+        kind,
+        rtpParameters,
+      });
+      await consumer.resume();
+      console.log("consumer resumed");
+      console.log("consumer track", consumer.track);
+
+      // Check connection state after a brief delay to see the transition
+      setTimeout(() => {
+        console.log("recv transport state after resume (delayed):", recvTransport.connectionState);
+      }, 100);
+
+      stream = new MediaStream();
+      stream.addTrack(consumer.track);
+
+      console.log("stream", stream);
+    });
   };
 
   const [joinRoomId, setJoinRoomId] = useState<string>("");
-  const [isJoinDialogOpen, setIsJoinDialogOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [isJoinDialogOpen, setIsJoinDialogOpen] = useState<boolean>(false);
 
-  const handleJoinRoom = () => {
-    if (joinRoomId.trim() && ws) {
-      console.log("Joining room:", joinRoomId);
-      ws.send(
-        JSON.stringify({
-          type: "join-room",
-          userId: userIdRef.current,
-          roomId: joinRoomId,
-        })
-      );
-      setIsJoinDialogOpen(false);
-    }
+  const [copied, setCopied] = useState<boolean>(false);
+
+  const copyRoomId = () => {
+    navigator.clipboard.writeText(roomId);
+    setCopied(true);
   };
-
-  const copyRoomId = async () => {
-    try {
-      await navigator.clipboard.writeText(roomId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error("Failed to copy room ID:", err);
-    }
-  };
-
-  useEffect(() => {
-    let websocket: WebSocket | null = null;
-
-    try {
-      websocket = new WebSocket("ws://localhost:8080");
-      setWs(websocket);
-      websocket.onopen = () => {
-        console.log("Connected to server");
-      };
-      websocket.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        console.log(data);
-
-        if (data.type === "offer") {
-          const offer = new RTCSessionDescription(data.offer);
-          const roomId = data.roomId;
-
-          const localConnection = new RTCPeerConnection();
-          localConnection.ontrack = (event) => {
-            console.log("got track event", event);
-            const video = document.createElement("video");
-            video.srcObject = event.streams[0];
-            video.play();
-            document.body.appendChild(video);
-          };
-
-          navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
-            localConnection.addTrack(stream.getTracks()[0], stream);
-            const video = document.createElement("video");
-            video.srcObject = stream;
-            video.play();
-            document.body.appendChild(video);
-
-            localConnection.setRemoteDescription(offer);
-            localConnection.createAnswer().then((answer) => {
-              localConnection.setLocalDescription(answer);
-              websocket?.send(
-                JSON.stringify({
-                  type: "answer",
-                  userId: userIdRef.current,
-                  roomId: roomId,
-                  answer: answer,
-                })
-              );
-            });
-          });
-        } else if (data.type === "answer") {
-          const answer = new RTCSessionDescription(data.answer);
-          hostConnectionRef.current?.setRemoteDescription(answer);
-        }
-
-        // console.log(event.data);
-      };
-      // websocket.onerror = (error) => {
-      //   console.error("WebSocket error:", error);
-      // };
-      // websocket.onclose = () => {
-      //   console.log("WebSocket connection closed");
-      // };
-    } catch (error) {
-      console.error("Failed to create WebSocket connection:", error);
-    }
-
-    // Cleanup function
-    return () => {
-      if (websocket && (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING)) {
-        websocket.close();
-      }
-    };
-  }, []);
 
   return (
     <TooltipProvider>
@@ -238,10 +246,10 @@ function App() {
                       value={joinRoomId}
                       onChange={(e) => setJoinRoomId(e.target.value)}
                       className="text-center text-lg tracking-wider"
-                      onKeyPress={(e) => e.key === "Enter" && handleJoinRoom()}
+                      onKeyPress={(e) => e.key === "Enter" && handleJoinRoom(joinRoomId)}
                     />
                     <Button
-                      onClick={handleJoinRoom}
+                      onClick={() => handleJoinRoom(joinRoomId)}
                       className="w-full bg-blue-600 hover:bg-blue-700"
                       disabled={!joinRoomId.trim()}
                     >
@@ -282,6 +290,17 @@ function App() {
               </div>
             </CardContent>
           </Card>
+
+          <div className="flex flex-col gap-4 items-center justify-center">
+            <div className="flex items-center justify-center gap-2">
+              <p className="text-sm text-gray-500">Your Video</p>
+              <video ref={localVideoElementRef} autoPlay playsInline muted className="w-full h-full" />
+            </div>
+            <div className="flex items-center justify-center gap-2">
+              <p className="text-sm text-gray-500">Remote Video</p>
+              <video ref={remoteVideoElementRef} className="w-full h-full" autoPlay playsInline />
+            </div>
+          </div>
         </div>
       </div>
     </TooltipProvider>
