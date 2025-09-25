@@ -1,0 +1,14 @@
+v=0
+o=- 0 0 IN IP4 127.0.0.1
+s=Mediasoup WebRTC to RTP Bridge
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 18000 RTP/AVP 100
+a=rtpmap:100 OPUS/48000/2
+a=fmtp:100 useinbandfec=1
+a=ssrc:386441591 cname:mediasoup
+a=ssrc:386441591 msid:mediasoup-stream audio-track
+a=ssrc:386441591 mslabel:mediasoup-stream
+a=ssrc:386441591 label:audio-track
+a=rtcp:18001
+a=recvonly

@@ -26,7 +26,9 @@ const generateRandomString = (length: number = 10): string => {
 };
 
 function App() {
-  const [roomId, setRoomId] = useState<string>(generateRandomString(12));
+  const initialRoomId = useRef<string>(generateRandomString(12));
+  const [roomId, setRoomId] = useState<string>(initialRoomId.current);
+  // const [producers, setProducers] = useState<{ video?: string; audio?: string }>({});
   // const userIdRef = useRef<string>(generateRandomString(12));
   const {
     initializeConnection,
@@ -35,6 +37,7 @@ function App() {
     requestConnectTransport,
     requestProduce,
     requestConsume,
+    requestProducers,
   } = useSignaling();
 
   // const peerConnectionRef = useRef<RTCPeerConnection>(new RTCPeerConnection());
@@ -45,13 +48,13 @@ function App() {
   const remoteVideoElementRef = useRef<HTMLVideoElement | null>(null);
   const deviceRef = useRef<Device>(new Device());
 
-  const initalizeMediasoup = async (ws: WebSocket) => {
+  const initalizeMediasoup = useCallback(async (ws: WebSocket) => {
     const capabilities = await requestRouterCapabilities(ws);
     if (!capabilities) return;
     // setRouterCapabilities(capabilities);
     if (deviceRef.current.loaded) return;
     await deviceRef.current.load({ routerRtpCapabilities: capabilities });
-  };
+  }, []);
 
   useEffect(() => {
     initializeConnection(initalizeMediasoup);
@@ -73,35 +76,65 @@ function App() {
       console.log("icegatheringstatechange", event);
     });
 
-    sendTransport.on("connect", async ({ dtlsParameters }, callback, error) => {
-      await requestConnectTransport({ dtlsParameters });
+    sendTransport.on("connectionstatechange", (state) => {
+      console.log("🔄 send transport connectionstatechange:", state);
+    });
 
-      callback();
+    sendTransport.on("connect", async ({ dtlsParameters }, callback, error) => {
+      console.log("🔗 Send transport connect event triggered");
+      try {
+        await requestConnectTransport({ dtlsParameters });
+        console.log("✅ Transport connection request completed");
+        callback();
+      } catch (err) {
+        console.error("❌ Transport connection failed:", err);
+        if (error) {
+          error(err as Error);
+        }
+      }
     });
 
     sendTransport.on("produce", async ({ kind, rtpParameters }, callback) => {
-      const producer = await requestProduce({ kind, rtpParameters });
-      if (!producer) return;
-      setRoomId(producer.id);
+      console.log("🎬 Producing", { kind, rtpParameters });
+      try {
+        const producer = await requestProduce({ kind, rtpParameters });
+        if (!producer) return;
 
-      callback({ id: producer.id });
-    });
+        // Store producer ID based on track kind (commented out for now)
+        // setProducers((prev) => ({
+        //   ...prev,
+        //   [kind]: producer.id,
+        // }));
 
-    sendTransport.on("connectionstatechange", (state) => {
-      console.log("send transport connectionstatechange", state);
+        // Use the first producer ID as room ID for simplicity
+        if (roomId === initialRoomId.current) {
+          setRoomId(producer.id);
+        }
+
+        callback({ id: producer.id });
+      } catch (err) {
+        console.error("❌ Producer creation failed:", err);
+      }
     });
 
     console.log("requesting media");
 
-    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(async (stream) => {
       console.log("got media streams");
       if (localVideoElementRef.current && !localVideoElementRef.current.srcObject) {
         localVideoElementRef.current.srcObject = stream;
         localVideoElementRef.current?.play();
       }
-      stream.getTracks().forEach((track) => {
-        sendTransport.produce({ track });
-      });
+
+      // Produce each track separately
+      for (const track of stream.getTracks()) {
+        console.log(`Producing ${track.kind} track`);
+        try {
+          await sendTransport.produce({ track });
+        } catch (error) {
+          console.error(`Error producing ${track.kind} track:`, error);
+        }
+      }
     });
   };
 
@@ -119,25 +152,15 @@ function App() {
       console.log("connected to recv transport");
     });
 
-    let stream: MediaStream;
+    const stream = new MediaStream();
+    let consumersConnected = 0;
+    const expectedConsumers = 2; // audio + video
+
     recvTransport.on("connectionstatechange", (state) => {
       console.log("🔄 recv transport connectionstatechange:", state);
       switch (state) {
-        case "new":
-          console.log("📝 Transport initialized but not connected yet");
-          break;
-        case "connecting":
-          console.log("🔗 Transport attempting to connect (DTLS handshake)");
-          break;
         case "connected":
           console.log("✅ Transport successfully connected!");
-          console.log("stream", stream);
-          if (remoteVideoElementRef.current && !remoteVideoElementRef.current.srcObject) {
-            console.log("setting remote video element src object");
-            remoteVideoElementRef.current.srcObject = stream;
-            remoteVideoElementRef.current?.play();
-            console.log("remote video element src object set", remoteVideoElementRef.current);
-          }
           break;
         case "failed":
           console.log("❌ Transport connection failed");
@@ -151,37 +174,70 @@ function App() {
       }
     });
 
-    const consumer = await requestConsume({ producerId: roomId, rtpCapabilities: deviceRef.current.rtpCapabilities });
+    // Function to consume a single producer
+    const consumeProducer = async (producerId: string) => {
+      try {
+        const consumer = await requestConsume({
+          producerId,
+          rtpCapabilities: deviceRef.current.rtpCapabilities,
+        });
 
-    console.log("recv transport", recvTransport.connectionState);
-    console.log("got consumer", consumer);
-    if (!consumer) return;
-    const { id, producerId, kind, rtpParameters } = consumer;
-    recvTransport.consume({ id, producerId, kind, rtpParameters }).then(async (consumer) => {
-      console.log("consuming");
+        if (!consumer) {
+          console.warn(`Failed to get consumer for producer ${producerId}`);
+          return;
+        }
 
-      console.log("recv transport state before resume:", recvTransport.connectionState);
+        const { id, producerId: consumerProducerId, kind, rtpParameters } = consumer;
+        const mediaConsumer = await recvTransport.consume({
+          id,
+          producerId: consumerProducerId,
+          kind,
+          rtpParameters,
+        });
 
-      console.log("consumer", {
-        id,
-        producerId,
-        kind,
-        rtpParameters,
-      });
-      await consumer.resume();
-      console.log("consumer resumed");
-      console.log("consumer track", consumer.track);
+        console.log(`Consuming ${kind} track from producer ${producerId}`);
+        await mediaConsumer.resume();
 
-      // Check connection state after a brief delay to see the transition
-      setTimeout(() => {
-        console.log("recv transport state after resume (delayed):", recvTransport.connectionState);
-      }, 100);
+        console.log("adding stream");
+        // Add track to the stream
+        stream.addTrack(mediaConsumer.track);
+        consumersConnected++;
 
-      stream = new MediaStream();
-      stream.addTrack(consumer.track);
+        // If we have all expected tracks, set up the video element
+        if (consumersConnected === expectedConsumers) {
+          console.log("remoteVideoElementRef.current", remoteVideoElementRef.current);
 
-      console.log("stream", stream);
-    });
+          if (remoteVideoElementRef.current && !remoteVideoElementRef.current.srcObject) {
+            console.log("Setting remote video element with stream containing", stream.getTracks().length, "tracks");
+            remoteVideoElementRef.current.srcObject = stream;
+            remoteVideoElementRef.current?.play();
+          }
+        }
+      } catch (error) {
+        console.error(`Error consuming producer ${producerId}:`, error);
+      }
+    };
+
+    // Get all available producers and consume them
+    try {
+      const availableProducers = await requestProducers();
+      if (availableProducers && availableProducers.length > 0) {
+        console.log("Found available producers:", availableProducers);
+
+        // Consume each available producer
+        for (const producer of availableProducers) {
+          await consumeProducer(producer.id);
+        }
+      } else {
+        console.log("No producers found, trying roomId as fallback");
+        // Fallback: try to consume the roomId as a producer ID
+        await consumeProducer(roomId);
+      }
+    } catch (error) {
+      console.error("Error getting producers:", error);
+      // Fallback: try to consume the roomId as a producer ID
+      await consumeProducer(roomId);
+    }
   };
 
   const [joinRoomId, setJoinRoomId] = useState<string>("");

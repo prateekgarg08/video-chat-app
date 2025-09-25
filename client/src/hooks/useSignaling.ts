@@ -179,6 +179,31 @@ export const useSignaling = () => {
     return consume;
   };
 
+  const waitForProducers = async (
+    ws: WebSocket
+  ): Promise<Array<{ id: string; kind: string; socketId: string }> | undefined> => {
+    return new Promise((resolve) => {
+      ws?.addEventListener("message", (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === "getProducers") {
+          resolve(data.data.producers);
+        }
+      });
+    });
+  };
+
+  const requestProducers = async () => {
+    if (!ws) {
+      handleMissingWs();
+      return;
+    }
+    ws.send(JSON.stringify({ type: "getProducers" }));
+    const producers = await waitForProducers(ws);
+    console.log("got producers", producers);
+    if (!producers) return;
+    return producers;
+  };
+
   return {
     ws,
     initializeConnection,
@@ -188,5 +213,6 @@ export const useSignaling = () => {
     requestConnectTransport,
     requestProduce,
     requestConsume,
+    requestProducers,
   };
 };
